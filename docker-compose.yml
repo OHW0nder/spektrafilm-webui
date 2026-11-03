@@ -1,0 +1,23 @@
+services:
+  spektrafilm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: spektrafilm:local
+    container_name: spektrafilm
+    restart: unless-stopped
+    ports:
+      - "192.168.1.8:8321:8000"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "992"   # render
+      - "44"    # video
+    volumes:
+      - /srv/docker/spektrafilm/data:/data
+    environment:
+      NUMBA_NUM_THREADS: "12"
+      OMP_NUM_THREADS: "12"
+      NUMBA_CACHE_DIR: /tmp/numba
+      SPEKTRAFILM_MAX_PIXELS: "24000000"
+    shm_size: "1gb"

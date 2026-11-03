@@ -1,0 +1,13 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+data/
+tests/
+img/
+vendor/spektrafilm-rs/crates
+vendor/spektrafilm-rs/docs
+vendor/spektrafilm-rs/assets
+vendor/spektrafilm-rs/scripts
+vendor/spektrafilm-rs/tests

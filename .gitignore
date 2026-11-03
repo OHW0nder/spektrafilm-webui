@@ -190,3 +190,6 @@ uv.lock
 
 # claude
 .claude
+# spektrafilm webui deployment artifacts
+vendor/
+/data/
