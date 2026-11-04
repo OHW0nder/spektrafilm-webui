@@ -7,7 +7,6 @@ const state = {
   selectedId: null,
   beforeSrc: null,
   beforeImage: null,
-  rotated: new Map(),
   afterUrl: null,
   rotation: 0,
   zoom: 1,
@@ -279,53 +278,66 @@ async function uploadFiles(files) {
   status(`已添加 ${data.items.length} 张`);
 }
 
+function viewUrl(id, rotation) {
+  return `/api/view/${id}?rotation=${rotation}`;
+}
+
 function selectUpload(id) {
   if (!id || !state.uploads.some((u) => u.id === id)) return;
   state.selectedId = id;
-  state.rotated.clear();
   state.zoom = 1;
   state.panX = state.panY = 0;
-  state.beforeSrc = `/api/view/${id}`;
+  state.beforeSrc = viewUrl(id, state.rotation);
   const image = new Image();
   image.onload = () => {
+    if (state.selectedId !== id ||
+        image.src !== new URL(state.beforeSrc, location.href).href) return;
     state.beforeImage = image;
-    $('#img-before').src = rotatedBefore(state.rotation);
+    $('#img-before').src = state.beforeSrc;
     layoutCanvas();
     applyTransform();
     schedulePreview(0);
   };
   image.src = state.beforeSrc;
   renderFilmstrip();
-  const meta = state.uploads.find((u) => u.id === id);
-  $('#viewer-meta').textContent = meta
-    ? `${meta.name} · ${meta.width}×${meta.height}${meta.raw ? ' · RAW' : ''}`
-    : '';
+  updateViewerMeta();
 }
 
-function rotatedBefore(k) {
-  if (k === 0) return state.beforeSrc;
-  if (state.rotated.has(k)) return state.rotated.get(k);
-  const image = state.beforeImage;
-  if (!image) return state.beforeSrc;
-  const w = image.naturalWidth, h = image.naturalHeight;
-  const canvas = document.createElement('canvas');
-  canvas.width = k % 2 ? h : w;
-  canvas.height = k % 2 ? w : h;
-  const ctx = canvas.getContext('2d');
-  ctx.translate(canvas.width / 2, canvas.height / 2);
-  ctx.rotate(k * Math.PI / 2);
-  ctx.drawImage(image, -w / 2, -h / 2);
-  const url = canvas.toDataURL('image/png');
-  state.rotated.set(k, url);
-  return url;
+function loadBefore(k) {
+  const id = state.selectedId;
+  if (!id) return;
+  const url = viewUrl(id, k);
+  const image = new Image();
+  image.onload = () => {
+    if (state.selectedId !== id || state.rotation !== k) return;
+    state.beforeImage = image;
+    state.beforeSrc = url;
+    $('#img-before').src = url;
+    layoutCanvas();
+    applyTransform();
+  };
+  image.src = url;
 }
 
 function setRotation(k) {
   state.rotation = k;
-  if (state.beforeImage) $('#img-before').src = rotatedBefore(k);
-  layoutCanvas();
-  applyTransform();
-  schedulePreview();
+  // The old processed half has the previous orientation: hide it until the
+  // new GPU preview arrives so the comparison never shows mismatched halves.
+  if (state.afterUrl) URL.revokeObjectURL(state.afterUrl);
+  state.afterUrl = null;
+  $('#img-after').removeAttribute('src');
+  applyCompare();
+  loadBefore(k);
+  updateViewerMeta();
+  schedulePreview(0);
+}
+
+function updateViewerMeta() {
+  const meta = state.uploads.find((u) => u.id === state.selectedId);
+  if (!meta) return;
+  $('#viewer-meta').textContent =
+    `${meta.name} · ${meta.width}×${meta.height}${meta.raw ? ' · RAW' : ''}` +
+    (state.rotation ? ` · 旋转 ${state.rotation * 90}°` : '');
 }
 
 function layoutCanvas() {
@@ -333,10 +345,8 @@ function layoutCanvas() {
   const image = state.beforeImage;
   if (!image) return;
   const vp = $('#viewport').getBoundingClientRect();
-  const rotated = state.rotation % 2 === 1;
-  const ratio = rotated
-    ? image.naturalHeight / image.naturalWidth
-    : image.naturalWidth / image.naturalHeight;
+  // beforeImage is already the server-rendered rotated view.
+  const ratio = image.naturalWidth / image.naturalHeight;
   let width = vp.width - 32, height = width / ratio;
   if (height > vp.height - 32) { height = vp.height - 32; width = height * ratio; }
   canvas.style.width = `${width}px`;
@@ -529,7 +539,7 @@ function renderFilmstrip() {
       : job.status === 'failed' ? '<span class="pill fail">失败</span>'
       : done ? '<span class="pill done">已出图</span>' : '';
     return `<div class="card ${item.id === state.selectedId ? 'selected' : ''}" data-id="${item.id}">
-      <img src="/api/view/${item.id}" alt="">
+      <img src="/api/view/${item.id}?rotation=${state.rotation}" alt="">
       ${pill}
       <button class="remove" title="从列表移除">×</button>
       <div class="name" title="${item.name}">${item.name}</div>

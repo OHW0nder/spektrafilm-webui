@@ -99,11 +99,26 @@ def uploads() -> list[dict[str, Any]]:
 
 
 @app.get("/api/view/{upload_id}")
-def view(upload_id: str) -> FileResponse:
-    path = UPLOAD_DIR / f"{_check_id(upload_id)}.view.png"
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="view not found")
-    return FileResponse(str(path), media_type="image/png")
+def view(upload_id: str, rotation: int = 0) -> FileResponse:
+    """The unprocessed ('before') view, rotated server-side to match the render.
+
+    Keeping both halves of the comparison on the server avoids a client-side
+    race where a fast rotate click could leave the original unrotated.
+    """
+    upload_id = _check_id(upload_id)
+    k = int(rotation) % 4
+    if k == 0:
+        path = UPLOAD_DIR / f"{upload_id}.view.png"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="view not found")
+        return FileResponse(str(path), media_type="image/png")
+
+    rotated = UPLOAD_DIR / f"{upload_id}.view.{k}.png"
+    if not rotated.is_file():
+        image = engine_py.load_cached(str(_cache_path(upload_id)))
+        image = engine_py.rotate(image, k)
+        rotated.write_bytes(engine_py.display_png(image))
+    return FileResponse(str(rotated), media_type="image/png")
 
 
 @app.post("/api/upload")
@@ -383,8 +398,11 @@ def _cache_path(upload_id: str) -> Path:
 
 
 def _original_path(upload_id: str) -> Path:
-    matches = [p for p in UPLOAD_DIR.glob(f"{_check_id(upload_id)}.*")
-               if not p.name.endswith((".meta.json", ".src.tif", ".view.png"))]
+    uid = _check_id(upload_id)
+    matches = [p for p in UPLOAD_DIR.glob(f"{uid}.*")
+               if p.name not in {f"{uid}.src.tif", f"{uid}.meta.json",
+                                 f"{uid}.view.png"}
+               and not p.name.startswith(f"{uid}.view.")]
     if not matches:
         raise HTTPException(status_code=404, detail="original file missing")
     return matches[0]
