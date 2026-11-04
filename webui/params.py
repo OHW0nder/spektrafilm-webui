@@ -108,9 +108,6 @@ MANIFEST: list[dict[str, Any]] = [
      "kind": "bool", "group": "io"},
     {"path": "io.upscale_factor", "label": "输出放大倍数",
      "kind": "float", "min": 0.25, "max": 4.0, "step": 0.25, "group": "io"},
-    {"path": "io.input_color_space", "label": "输入色彩空间",
-     "kind": "select", "group": "io",
-     "options": ["ProPhoto RGB", "ITU-R BT.2020", "sRGB", "ACES2065-1", "Adobe RGB (1998)"]},
     {"path": "io.output_color_space", "label": "输出色彩空间",
      "kind": "select", "group": "io",
      "options": ["sRGB", "Display P3", "ITU-R BT.2020", "ProPhoto RGB", "Adobe RGB (1998)"]},
@@ -203,6 +200,10 @@ def build_params(payload: dict[str, Any]) -> RuntimePhotoParams:
         if path.split(".")[0] not in _EXTRA_ROOTS:
             raise KeyError(f"unknown parameter: {path}")
         _set_path(params, path, value)
+
+    # Uploads are decoded once into canonical linear ACES; ignore any user
+    # override so both engines see the same input space.
+    params.io.input_color_space = "ACES2065-1"
     return params
 
 

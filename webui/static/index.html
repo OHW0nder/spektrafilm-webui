@@ -8,48 +8,102 @@
 </head>
 <body>
 <header>
-  <div class="brand">
-    <h1>spektrafilm</h1>
-    <span class="sub">光谱胶片模拟</span>
-  </div>
+  <div class="brand"><h1>spektrafilm</h1><span class="sub">光谱胶片模拟</span></div>
   <div class="status">
     <span id="engine-badge" class="badge">…</span>
     <span id="timing" class="dim"></span>
+    <span id="queue-status" class="dim"></span>
   </div>
 </header>
 
 <main>
   <section class="stage">
-    <div id="dropzone" class="dropzone">
-      <input type="file" id="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.exr" hidden>
-      <p>拖入图片，或点击选择</p>
-      <p class="dim">TIFF / EXR / PNG / JPEG · 建议场景线性宽色域</p>
+    <div class="toolbar">
+      <input type="file" id="file" multiple
+             accept=".png,.jpg,.jpeg,.tif,.tiff,.exr,.rw2,.cr2,.cr3,.nef,.arw,.orf,.raf,.dng" hidden>
+      <button id="add" class="primary">+ 添加图片（可多选）</button>
+      <label class="mini">输入编码
+        <select id="input-encoding">
+          <option value="auto">自动</option>
+          <option value="srgb">sRGB 编码</option>
+          <option value="linear">场景线性</option>
+        </select>
+      </label>
+      <label class="mini">线性文件空间
+        <select id="source-space">
+          <option value="ProPhoto RGB">ProPhoto RGB</option>
+          <option value="ITU-R BT.2020">Rec.2020</option>
+          <option value="ACES2065-1">ACES2065-1</option>
+          <option value="sRGB">sRGB</option>
+        </select>
+      </label>
+      <span class="spacer"></span>
+      <button id="process-selected">处理选中</button>
+      <button id="process-all" class="primary">处理全部</button>
+      <label class="mini">方式
+        <select id="render-mode">
+          <option value="gpu">快速 GPU 出图</option>
+          <option value="cpu">精确 f64（慢）</option>
+        </select>
+      </label>
+      <label class="mini">尺寸
+        <select id="render-size">
+          <option value="1600">1600 px</option>
+          <option value="2400" selected>2400 px</option>
+          <option value="3600">3600 px</option>
+          <option value="6000">原始（很慢）</option>
+        </select>
+      </label>
+      <a id="download-all" class="button-link" href="/api/download-all">下载全部</a>
     </div>
-    <figure id="preview-wrap" hidden>
-      <img id="preview" alt="预览">
-      <figcaption id="preview-meta" class="dim"></figcaption>
-    </figure>
-    <div id="render-panel" class="render" hidden>
-      <button id="render" class="primary">导出全分辨率 (f64)</button>
+
+    <div id="viewer" class="viewer">
+      <div id="viewport" class="viewport">
+        <div id="empty-hint" class="empty-hint">拖入图片或点击「添加图片」开始 · 支持 RAW / TIFF / EXR / JPG</div>
+        <div id="canvas" class="canvas" hidden>
+          <img id="img-before" alt="原图">
+          <div id="after-clip" class="after-clip"><img id="img-after" alt="胶片效果"></div>
+          <div id="divider" class="divider"><span class="handle">↔</span></div>
+        </div>
+      </div>
+      <div class="viewer-tools">
+        <div class="tool-group">
+          <button id="zoom-out" title="缩小">−</button>
+          <span id="zoom-label" class="dim">100%</span>
+          <button id="zoom-in" title="放大">+</button>
+          <button id="zoom-reset">适应</button>
+          <span class="dim hint">滚轮缩放 · 拖拽平移</span>
+        </div>
+        <div class="tool-group">
+          <button id="rot-left">↶ 左转</button>
+          <button id="rot-right">↷ 右转</button>
+          <span class="dim hint">旋转会应用到预览与导出</span>
+        </div>
+        <div class="tool-group grow">
+          <button id="compare-toggle" class="active">前后对比</button>
+          <input type="range" id="compare-range" min="0" max="100" value="50" aria-label="前后对比">
+          <span id="compare-label" class="dim">原图 / 胶片</span>
+        </div>
+      </div>
+      <div id="viewer-meta" class="dim viewer-meta"></div>
+    </div>
+
+    <div class="strip-wrap">
+      <div class="section-title">待处理图片 <span id="upload-count" class="dim"></span></div>
+      <div id="filmstrip" class="filmstrip"></div>
+    </div>
+
+    <div class="strip-wrap">
+      <div class="section-title">结果（已保存到服务器） <span id="result-count" class="dim"></span></div>
+      <div id="results-grid" class="results-grid"></div>
       <div id="render-status" class="dim"></div>
     </div>
   </section>
 
   <aside class="controls">
     <div class="profile-row">
-      <label>输入编码
-        <select id="input-encoding">
-          <option value="auto">自动（PNG/JPEG=sRGB，TIFF/EXR=线性）</option>
-          <option value="srgb">sRGB 编码</option>
-          <option value="linear">场景线性</option>
-        </select>
-      </label>
-      <label>胶片
-        <select id="film"></select>
-      </label>
-      <label>相纸
-        <select id="print"></select>
-      </label>
+      <label>胶片<select id="film"></select></label>
+      <label>相纸<select id="print"></select></label>
     </div>
     <div id="sections"></div>
     <details class="advanced">
@@ -61,8 +115,7 @@
 </main>
 
 <footer class="dim">
-  预览走 wgpu/Vulkan (f32)，导出走 Python f64 参考实现 ·
-  <span id="health">…</span>
+  <span id="health">…</span> · 预览走 wgpu/Vulkan，导出可选 GPU 快速或 Python f64 精确
 </footer>
 
 <script src="/static/app.js"></script>

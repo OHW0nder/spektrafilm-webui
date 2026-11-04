@@ -49,6 +49,21 @@ class JobStore:
     def exists(self, job_id: str) -> bool:
         return os.path.exists(self._path(job_id))
 
+    def reconcile(self) -> int:
+        """Mark jobs left running by a previous container as interrupted.
+
+        The job files live on a volume, so a restart would otherwise leave a
+        task spinning forever in the UI with no worker behind it.
+        """
+        fixed = 0
+        for job in self.list_recent(limit=10000):
+            if job.get("status") in {"queued", "running"}:
+                self.update(job["id"], status="interrupted",
+                            error="容器重启，任务中断；请重新导出",
+                            finished=time.time())
+                fixed += 1
+        return fixed
+
     def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:
         entries = []
         for name in os.listdir(self._dir):
