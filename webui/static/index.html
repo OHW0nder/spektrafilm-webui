@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>spektrafilm</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=__ASSET_VERSION__">
 </head>
 <body>
 <header>
   <div class="brand"><h1>spektrafilm</h1><span class="sub">光谱胶片模拟</span></div>
   <nav class="tabs">
-    <button class="tab active" data-tab="work">参数调整</button>
-    <button class="tab" data-tab="queue">队列 <span id="queue-badge" class="badge-num">0</span></button>
-    <button class="tab" data-tab="gallery">图库</button>
+    <button class="tab active" data-tab="gallery">图库</button>
+    <button class="tab" data-tab="work">处理工作台 <span id="queue-badge" class="badge-num">0</span></button>
   </nav>
   <div class="status">
     <span id="engine-badge" class="badge">…</span>
@@ -21,13 +21,92 @@
 </header>
 
 <main>
-  <!-- 1. 参数调整 -->
-  <section id="tab-work" class="tab-page active">
+  <!-- 首页 = 图库 -->
+  <section id="tab-gallery" class="tab-page active">
+    <div class="gallery-head">
+      <div>
+        <h2>处理图库</h2>
+        <span class="dim">已完成的图片保存在服务器，点卡片下载</span>
+      </div>
+      <div class="gallery-actions">
+        <input type="file" id="file" multiple
+               accept=".png,.jpg,.jpeg,.tif,.tiff,.exr,.rw2,.cr2,.cr3,.nef,.arw,.orf,.raf,.dng" hidden>
+        <button id="add" class="primary">+ 导入图片 / 批量处理</button>
+        <a id="download-all" class="button-link" href="/api/download-all">下载全部 (zip)</a>
+      </div>
+    </div>
+    <div class="gallery-settings">
+      <label class="mini">输入编码
+        <select id="input-encoding">
+          <option value="auto">自动（PNG/JPEG=sRGB，TIFF/EXR/RAW=线性）</option>
+          <option value="srgb">sRGB 编码</option>
+          <option value="linear">场景线性</option>
+        </select>
+      </label>
+      <label class="mini">线性文件空间
+        <select id="source-space">
+          <option value="ProPhoto RGB">ProPhoto RGB</option>
+          <option value="ITU-R BT.2020">Rec.2020</option>
+          <option value="ACES2065-1">ACES2065-1</option>
+          <option value="sRGB">sRGB</option>
+        </select>
+      </label>
+      <span id="result-count" class="dim"></span>
+    </div>
+    <div id="results-grid" class="results-grid"></div>
+  </section>
+
+  <!-- 处理工作台 -->
+  <section id="tab-work" class="tab-page">
+    <div class="work-toolbar">
+      <button id="back-gallery">← 图库</button>
+      <button id="import-more">+ 导入更多</button>
+      <button id="preset-open" class="mobile-only">预设</button>
+      <span class="spacer"></span>
+      <label class="mini">方式
+        <select id="render-mode">
+          <option value="gpu">快速 GPU 出图</option>
+          <option value="cpu">精确 f64（慢）</option>
+        </select>
+      </label>
+      <label class="mini">尺寸
+        <select id="render-size">
+          <option value="1600">1600 px</option>
+          <option value="2400" selected>2400 px</option>
+          <option value="3600">3600 px</option>
+          <option value="6000">原始</option>
+        </select>
+      </label>
+      <button id="process-current">处理当前</button>
+      <button id="process-all" class="primary">处理全部</button>
+    </div>
+
     <div class="work-grid">
-      <div class="work-left">
+      <!-- 左：预设 / 胶片风格（手机端变弹窗） -->
+      <aside id="preset-panel" class="rail-left">
+        <div class="panel-head">预设 <button id="preset-close" class="mobile-only">×</button></div>
+        <div class="panel-body">
+          <select id="preset-select"></select>
+          <div class="preset-actions">
+            <button id="preset-apply">应用</button>
+            <input id="preset-name" placeholder="新预设名称" spellcheck="false">
+            <button id="preset-save">保存</button>
+            <button id="preset-delete">删除</button>
+          </div>
+        </div>
+        <div class="panel-head">胶片风格</div>
+        <div class="panel-body">
+          <label>胶片<select id="film"></select></label>
+          <label>相纸<select id="print"></select></label>
+          <div id="style-chips" class="style-chips"></div>
+        </div>
+      </aside>
+
+      <!-- 中：预览 + 底部队列 -->
+      <div class="work-center">
         <div id="viewer" class="viewer">
           <div id="viewport" class="viewport">
-            <div id="empty-hint" class="empty-hint">到「队列」添加图片，然后回到这里调参数</div>
+            <div id="empty-hint" class="empty-hint">从图库导入图片后开始调整</div>
             <div id="canvas" class="canvas" hidden>
               <img id="img-before" alt="原图">
               <div id="after-clip" class="after-clip"><img id="img-after" alt="胶片效果"></div>
@@ -54,97 +133,36 @@
           </div>
           <div id="viewer-meta" class="dim viewer-meta"></div>
           <div class="work-actions">
-            <span class="dim hint">图片上按住拖动 = 移动画面；对比位置请用上方滑杆</span>
-            <button id="process-current">处理当前图</button>
+            <span class="dim hint">图片上按住拖动 = 移动画面；对比位置用上方滑杆</span>
+            <button id="clear-done">清除已完成</button>
           </div>
         </div>
-      </div>
-      <div class="work-right">
-        <div class="preset-bar">
-          <div class="section-title">预设</div>
-          <select id="preset-select"></select>
-          <div class="preset-actions">
-            <button id="preset-apply">应用</button>
-            <input id="preset-name" placeholder="新预设名称" spellcheck="false">
-            <button id="preset-save">保存</button>
-            <button id="preset-delete">删除</button>
-          </div>
-        </div>
-        <div class="profile-row">
-          <label>胶片<select id="film"></select></label>
-          <label>相纸<select id="print"></select></label>
-        </div>
-        <div id="sections"></div>
-        <details class="advanced">
-          <summary>高级：原始参数 (JSON)</summary>
-          <textarea id="extra" spellcheck="false" placeholder='{"camera.lens_blur_um": 2.0}'></textarea>
-          <button id="apply-extra">应用</button>
+
+        <details id="queue-panel" class="queue-panel" open>
+          <summary>队列 <span id="queue-summary" class="dim"></span></summary>
+          <div class="queue-list" id="queue-list"></div>
         </details>
       </div>
-    </div>
-  </section>
 
-  <!-- 2. 队列 -->
-  <section id="tab-queue" class="tab-page">
-    <div class="page-head">
-      <h2>队列</h2>
-      <span id="queue-summary" class="dim"></span>
+      <!-- 右：参数调整 -->
+      <aside class="rail-right">
+        <div class="panel-head">参数调整</div>
+        <div class="panel-body">
+          <div id="sections"></div>
+          <details class="advanced">
+            <summary>高级：原始参数 (JSON)</summary>
+            <textarea id="extra" spellcheck="false" placeholder='{"camera.lens_blur_um": 2.0}'></textarea>
+            <button id="apply-extra">应用</button>
+          </details>
+        </div>
+      </aside>
     </div>
-    <div class="toolbar">
-      <input type="file" id="file" multiple
-             accept=".png,.jpg,.jpeg,.tif,.tiff,.exr,.rw2,.cr2,.cr3,.nef,.arw,.orf,.raf,.dng" hidden>
-      <button id="add" class="primary">+ 添加图片（可多选）</button>
-      <label class="mini">输入编码
-        <select id="input-encoding">
-          <option value="auto">自动</option>
-          <option value="srgb">sRGB 编码</option>
-          <option value="linear">场景线性</option>
-        </select>
-      </label>
-      <label class="mini">线性文件空间
-        <select id="source-space">
-          <option value="ProPhoto RGB">ProPhoto RGB</option>
-          <option value="ITU-R BT.2020">Rec.2020</option>
-          <option value="ACES2065-1">ACES2065-1</option>
-          <option value="sRGB">sRGB</option>
-        </select>
-      </label>
-      <span class="spacer"></span>
-      <label class="mini">方式
-        <select id="render-mode">
-          <option value="gpu">快速 GPU 出图</option>
-          <option value="cpu">精确 f64（慢）</option>
-        </select>
-      </label>
-      <label class="mini">尺寸
-        <select id="render-size">
-          <option value="1600">1600 px</option>
-          <option value="2400" selected>2400 px</option>
-          <option value="3600">3600 px</option>
-          <option value="6000">原始（GPU 约 11s / f64 很慢）</option>
-        </select>
-      </label>
-      <button id="process-all" class="primary">处理全部</button>
-      <button id="clear-done">清除已完成</button>
-    </div>
-    <div id="dropzone" class="dropzone">拖入图片到这里（可多选）</div>
-    <div class="queue-list" id="queue-list"></div>
-    <div id="render-status" class="dim"></div>
-  </section>
-
-  <!-- 3. 图库 -->
-  <section id="tab-gallery" class="tab-page">
-    <div class="page-head">
-      <h2>处理图库</h2>
-      <span id="result-count" class="dim"></span>
-      <a id="download-all" class="button-link" href="/api/download-all">下载全部 (zip)</a>
-    </div>
-    <div id="results-grid" class="results-grid"></div>
   </section>
 </main>
 
+<div id="render-status" class="dim status-bar"></div>
 <footer class="dim"><span id="health">…</span></footer>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=__ASSET_VERSION__"></script>
 </body>
 </html>

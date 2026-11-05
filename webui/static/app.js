@@ -1,7 +1,7 @@
 'use strict';
 
 const state = {
-  tab: 'work',
+  tab: 'gallery',
   manifest: null,
   uploads: [],
   results: [],
@@ -11,38 +11,54 @@ const state = {
   beforeSrc: null,
   beforeImage: null,
   afterUrl: null,
-  afterHidden: false,  // rotation hides the stale half until its replacement loads
+  afterHidden: false,
   zoom: 1, panX: 0, panY: 0,
   compare: 0.5, compareOn: true,
   extra: {},
   jobs: {},             // uploadId -> job state
   timer: null, inflight: null, seq: 0,
+  queueUserToggled: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
+const isMobile = () => window.matchMedia('(max-width: 1080px)').matches;
 
+/* Boot is deliberately fault-tolerant: one broken panel must never leave the
+   view buttons without click handlers (the exact failure behind "点击没反应"). */
 async function boot() {
-  const [health, manifest, uploads, results, presets] = await Promise.all([
-    fetch('/api/health').then((r) => r.json()),
-    fetch('/api/manifest').then((r) => r.json()),
-    fetch('/api/uploads').then((r) => r.json()),
-    fetch('/api/results').then((r) => r.json()),
-    fetch('/api/presets').then((r) => r.json()),
-  ]);
-  state.manifest = manifest;
-  state.uploads = uploads;
-  state.results = results;
-  state.presets = presets;
-  uploads.forEach((u) => { state.rotations[u.id] = u.rotation || 0; });
-  renderHealth(health);
-  renderProfiles(manifest);
-  renderControls(manifest);
-  renderPresets();
-  renderQueue();
-  renderResults();
-  wire();
-  if (uploads.length) selectUpload(uploads[0].id);
+  try {
+    const [health, manifest, uploads, results, presets] = await Promise.all([
+      fetch('/api/health').then((r) => r.json()),
+      fetch('/api/manifest').then((r) => r.json()),
+      fetch('/api/uploads').then((r) => r.json()),
+      fetch('/api/results').then((r) => r.json()),
+      fetch('/api/presets').then((r) => r.json()),
+    ]);
+    state.manifest = manifest;
+    state.uploads = uploads;
+    state.results = results;
+    state.presets = presets;
+    uploads.forEach((u) => { state.rotations[u.id] = u.rotation || 0; });
+    const steps = [
+      ['health', () => renderHealth(health)],
+      ['profiles', () => { renderProfiles(manifest); renderStyleChips(manifest); }],
+      ['controls', () => renderControls(manifest)],
+      ['presets', () => renderPresets()],
+      ['queue', () => renderQueue()],
+      ['results', () => renderResults()],
+    ];
+    for (const [name, fn] of steps) {
+      try { fn(); } catch (err) { console.error(`render ${name}`, err); }
+    }
+    if (uploads.length) selectUpload(uploads[0].id);
+  } catch (err) {
+    console.error('boot', err);
+    status(`部分数据加载失败：${err.message}（界面仍可使用）`, true);
+  }
+  // Always wire, even if a render step failed.
+  try { wire(); } catch (err) { console.error('wire', err); }
+  syncLayout();
 }
 
 function renderHealth(health) {
@@ -50,7 +66,7 @@ function renderHealth(health) {
   badge.textContent = health.engine_gpu ? `GPU · ${health.gpu_backend}` : 'CPU only';
   badge.className = `badge ${health.engine_gpu ? 'gpu' : 'cpu'}`;
   $('#health').textContent =
-    `预览/默认导出：wgpu/Vulkan（f32） · 精确模式：Python f64（CPU，16-bit TIFF） · 缓存长边 ${health.preview_edge}px` +
+    `预览/默认导出：wgpu/Vulkan（f32） · 精确模式：Python f64（CPU，16-bit TIFF） · 预览 ${health.preview_size}px` +
     (health.interrupted_jobs ? ` · ${health.interrupted_jobs} 个旧任务已中断` : '');
 }
 
@@ -58,16 +74,25 @@ function switchTab(name) {
   state.tab = name;
   $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('.tab-page').forEach((p) => p.classList.toggle('active', p.id === `tab-${name}`));
-  if (name === 'work' && state.selectedId) layoutCanvas();
+  if (name === 'work') { layoutCanvas(); syncLayout(); }
+  if (name === 'gallery') $('#preset-panel').classList.remove('open');
+}
+
+function syncLayout() {
+  const panel = $('#queue-panel');
+  if (!state.queueUserToggled) panel.open = !isMobile();
+  if (!isMobile()) $('#preset-panel').classList.remove('open');
+  const setHeaderVar = () => document.documentElement.style.setProperty(
+    '--header-h', `${Math.round($('header').getBoundingClientRect().height)}px`);
+  setHeaderVar();
+  if (state.tab === 'work') layoutCanvas();
 }
 
 function currentRotation() {
   return state.selectedId ? (state.rotations[state.selectedId] || 0) : 0;
 }
 
-function viewUrl(id, rotation) {
-  return `/api/view/${id}?rotation=${rotation}`;
-}
+function viewUrl(id, rotation) { return `/api/view/${id}?rotation=${rotation}`; }
 
 /* ---------------- parameters ---------------- */
 
@@ -85,6 +110,22 @@ function renderProfiles(manifest) {
     schedulePreview();
   });
   paper.addEventListener('change', schedulePreview);
+}
+
+function renderStyleChips(manifest) {
+  const wanted = ['kodak_portra_400', 'kodak_gold_200', 'kodak_ektar_100', 'fujifilm_velvia_100'];
+  const host = $('#style-chips');
+  host.innerHTML = wanted.map((slug) => {
+    const entry = manifest.profiles.films.find((f) => f.slug === slug);
+    if (!entry) return '';
+    return `<button data-film="${slug}" data-paper="${entry.target_print || manifest.defaults.print}">${(entry.label || slug).replace(/^Kodak |^Fujifilm /, '')}</button>`;
+  }).join('');
+  host.querySelectorAll('button').forEach((button) => button.addEventListener('click', () => {
+    $('#film').value = button.dataset.film;
+    $('#print').value = button.dataset.paper;
+    schedulePreview();
+    $('#preset-panel').classList.remove('open');
+  }));
 }
 
 function renderControls(manifest) {
@@ -201,19 +242,16 @@ function applyPayload(newPayload) {
   if (newPayload.film) $('#film').value = newPayload.film;
   if (newPayload.print) $('#print').value = newPayload.print;
   Object.entries(newPayload.values || {}).forEach(([path, value]) => {
-    const inputs = $$(`[data-path="${path}"]`);
-    inputs.forEach((input) => {
-      if (input.dataset.kind === 'vec') {
-        input.value = value[Number(input.dataset.index)];
-      } else if (input.type === 'checkbox') input.checked = Boolean(value);
+    $$(`[data-path="${path}"]`).forEach((input) => {
+      if (input.dataset.kind === 'vec') input.value = value[Number(input.dataset.index)];
+      else if (input.type === 'checkbox') input.checked = Boolean(value);
       else input.value = value;
       const head = input.closest('.ctrl')?.querySelector('.val');
       if (head) head.textContent = formatValue(input.value, input.dataset.kind);
     });
   });
   state.extra = newPayload.extra || {};
-  $('#extra').value = state.extra && Object.keys(state.extra).length
-    ? JSON.stringify(state.extra, null, 2) : '';
+  $('#extra').value = Object.keys(state.extra).length ? JSON.stringify(state.extra, null, 2) : '';
   schedulePreview(0);
 }
 
@@ -223,8 +261,7 @@ function renderPresets() {
   const select = $('#preset-select');
   select.innerHTML = state.presets
     .map((p) => `<option value="${p.id}">${p.name}${p.builtin ? '（内置）' : ''}</option>`).join('');
-  const current = select.value;
-  const preset = state.presets.find((p) => p.id === current);
+  const preset = state.presets.find((p) => p.id === select.value);
   $('#preset-delete').disabled = !preset || preset.builtin;
 }
 
@@ -235,7 +272,11 @@ async function refreshPresets() {
 
 function applyPreset() {
   const preset = state.presets.find((p) => p.id === $('#preset-select').value);
-  if (preset) { applyPayload(preset.payload); status(`已应用预设：${preset.name}`); }
+  if (preset) {
+    applyPayload(preset.payload);
+    status(`已应用预设：${preset.name}`);
+    if (isMobile()) $('#preset-panel').classList.remove('open');
+  }
 }
 
 async function savePreset() {
@@ -246,9 +287,10 @@ async function savePreset() {
     body: JSON.stringify({ name, payload: payload() }),
   });
   if (!response.ok) return status('保存预设失败', true);
+  const entry = await response.json();
   $('#preset-name').value = '';
   await refreshPresets();
-  $('#preset-select').value = (await response.json()).id;
+  $('#preset-select').value = entry.id;
   renderPresets();
   status('预设已保存');
 }
@@ -269,8 +311,7 @@ function selectUpload(id) {
   if (!id || !state.uploads.some((u) => u.id === id)) return;
   state.selectedId = id;
   state.zoom = 1; state.panX = state.panY = 0;
-  const rotation = currentRotation();
-  state.beforeSrc = viewUrl(id, rotation);
+  state.beforeSrc = viewUrl(id, currentRotation());
   const image = new Image();
   image.onload = () => {
     if (state.selectedId !== id ||
@@ -303,8 +344,8 @@ function setRotation(k) {
   if (!state.selectedId) return;
   state.rotations[state.selectedId] = k;
   fetch(`/api/rotation/${state.selectedId}?rotation=${k}`, { method: 'POST' }).catch(() => {});
-  // Hide the stale processed half; a fresh preview with the same rotation follows.
-  hideAfter();
+  state.afterHidden = true;
+  applyCompare();
   showPreviewState('旋转中…');
   loadBefore(k);
   updateViewerMeta();
@@ -324,6 +365,7 @@ function layoutCanvas() {
   const canvas = $('#canvas'), image = state.beforeImage;
   if (!image) return;
   const vp = $('#viewport').getBoundingClientRect();
+  if (!vp.width || !vp.height) return;
   const ratio = image.naturalWidth / image.naturalHeight;
   let width = vp.width - 32, height = width / ratio;
   if (height > vp.height - 32) { height = vp.height - 32; width = height * ratio; }
@@ -358,20 +400,13 @@ function applyCompare() {
   $('#compare-label').textContent = `${Math.round(state.compare * 100)}%`;
 }
 
-function hideAfter() {
-  // Keep the old preview alive so a failed refresh never leaves a black frame.
-  state.afterHidden = true;
-  applyCompare();
-  showPreviewState('旋转中…');
-}
-
 function showPreviewState(text) {
   const node = $('#preview-state');
   node.textContent = text;
   node.hidden = !text;
 }
 
-/* ---------------- preview (robust: never blank on failure) ---------------- */
+/* ---------------- preview (never blank on failure) ---------------- */
 
 function schedulePreview(delay = 220) {
   if (!state.selectedId) return;
@@ -387,7 +422,6 @@ async function refreshPreview() {
   state.inflight = controller;
   const started = performance.now();
   showPreviewState('预览生成中…');
-
   let response;
   try {
     response = await fetch('/api/preview', {
@@ -458,15 +492,15 @@ function renderQueue() {
   $('#queue-summary').textContent = `${items.length} 张待处理 · ${busy} 张处理中 · 完成后自动移入图库`;
   const host = $('#queue-list');
   if (!items.length) {
-    host.innerHTML = '<div class="dim">队列为空。添加图片后点「处理全部」。</div>';
+    host.innerHTML = '<div class="dim">队列为空。点右上角「导入图片」添加。</div>';
     return;
   }
   host.innerHTML = items.map((item) => {
     const job = state.jobs[item.id] || { status: 'idle', progress: 0, stage: '待处理' };
-    const busy = job.status === 'running' || job.status === 'queued';
+    const active = job.status === 'running' || job.status === 'queued';
     const pill = job.status === 'failed' ? '<span class="pill fail">失败</span>'
-      : busy ? `<span class="pill busy">${job.stage || '处理中'}</span>` : '';
-    const detail = busy
+      : active ? `<span class="pill busy">${job.stage || '处理中'}</span>` : '';
+    const detail = active
       ? `${job.stage || '处理中'} · ${job.progress || 0}% · ${job.elapsed || 0}s` +
         (job.queue_position ? ` · 队列 ${job.queue_position}/${job.queue_total}` : '')
       : (job.status === 'failed' ? (job.error || '失败') : '等待处理');
@@ -475,7 +509,7 @@ function renderQueue() {
       <div class="info">
         <div class="name" title="${item.name}">${item.name} ${pill}</div>
         <div class="detail">${item.width}×${item.height}${item.raw ? ' · RAW' : ''} · ${detail}</div>
-        <div class="progress ${busy ? 'busy' : ''}"><div style="width:${busy ? (job.progress || 0) : 0}%"></div></div>
+        <div class="progress ${active ? 'busy' : ''}"><div style="width:${active ? (job.progress || 0) : 0}%"></div></div>
       </div>
       <div class="actions">
         <button data-act="preview">预览</button>
@@ -486,19 +520,17 @@ function renderQueue() {
   }).join('');
   host.querySelectorAll('.queue-item').forEach((row) => {
     const id = row.dataset.id;
-    row.querySelectorAll('button').forEach((button) => {
-      button.addEventListener('click', () => {
-        const act = button.dataset.act;
-        if (act === 'preview') { selectUpload(id); switchTab('work'); }
-        else if (act === 'process') process([id]);
-        else {
-          state.uploads = state.uploads.filter((u) => u.id !== id);
-          delete state.jobs[id];
-          if (state.selectedId === id) state.selectedId = null;
-          renderQueue();
-        }
-      });
-    });
+    row.querySelectorAll('button').forEach((button) => button.addEventListener('click', () => {
+      const act = button.dataset.act;
+      if (act === 'preview') { selectUpload(id); switchTab('work'); }
+      else if (act === 'process') process([id]);
+      else {
+        state.uploads = state.uploads.filter((u) => u.id !== id);
+        delete state.jobs[id];
+        if (state.selectedId === id) state.selectedId = null;
+        renderQueue();
+      }
+    }));
   });
 }
 
@@ -507,10 +539,8 @@ async function process(ids) {
   const rotations = {};
   ids.forEach((id) => { rotations[id] = state.rotations[id] || 0; });
   const body = {
-    upload_ids: ids, rotation: 0, rotations,
-    payload: payload(),
-    mode: $('#render-mode').value,
-    max_edge: Number($('#render-size').value),
+    upload_ids: ids, rotation: 0, rotations, payload: payload(),
+    mode: $('#render-mode').value, max_edge: Number($('#render-size').value),
   };
   ids.forEach((id) => { state.jobs[id] = { status: 'queued', progress: 0, stage: '排队中' }; });
   renderQueue();
@@ -527,11 +557,10 @@ async function process(ids) {
   }
   const data = await response.json();
   data.jobs.forEach((job) => {
-    state.jobs[job.upload_id] = { id: job.id, status: 'running', progress: 0,
-                                  stage: '排队中' };
+    state.jobs[job.upload_id] = { id: job.id, status: 'running', progress: 0, stage: '排队中' };
   });
   renderQueue();
-  status(`已提交 ${data.jobs.length} 张（${data.mode === 'gpu' ? 'GPU 快速' : 'f64 精确'}）`);
+  status(`已提交 ${data.jobs.length} 张（${data.mode === 'gpu' ? 'GPU 快速' : 'f64 精确'}），可继续调参数`);
   pollJobs(data.jobs.map((job) => job.id));
 }
 
@@ -552,7 +581,7 @@ async function pollJobs(ids) {
       if (['done', 'failed', 'interrupted'].includes(job.status)) {
         pending.delete(id);
         if (job.status === 'done') {
-          status(`完成：${job.output}（${job.duration || '?'}s）已移入图库`);
+          status(`完成：${job.output}（${job.duration || '?'}s）已存入图库`);
           await refreshResults();
         } else {
           status(`${job.source || '任务'} 失败：${job.error || job.status}`, true);
@@ -572,9 +601,9 @@ async function refreshResults() {
 
 function renderResults() {
   const host = $('#results-grid');
-  $('#result-count').textContent = `(${state.results.length})`;
+  $('#result-count').textContent = `共 ${state.results.length} 张`;
   if (!state.results.length) {
-    host.innerHTML = '<div class="dim">还没有结果，去「队列」处理图片。</div>';
+    host.innerHTML = '<div class="dim">还没有结果。点上方「导入图片 / 批量处理」开始。</div>';
     return;
   }
   host.innerHTML = state.results.map((item) => {
@@ -612,28 +641,34 @@ async function uploadFiles(files) {
   renderQueue();
   selectUpload(data.items[0].id);
   switchTab('work');
-  status(`已添加 ${data.items.length} 张，可开始调参数`);
+  status(`已导入 ${data.items.length} 张 · 调好参数后点「处理全部」，结果自动进图库`);
 }
 
 function wire() {
-  $$('.tab').forEach((button) =>
-    button.addEventListener('click', () => switchTab(button.dataset.tab)));
-
-  const fileInput = $('#file');
-  $('#add').addEventListener('click', () => fileInput.click());
-  fileInput.addEventListener('change', () => {
-    if (fileInput.files.length) uploadFiles([...fileInput.files]);
-    fileInput.value = '';
+  $$('.tab').forEach((button) => button.addEventListener('click', () => switchTab(button.dataset.tab)));
+  $('#back-gallery').addEventListener('click', () => switchTab('gallery'));
+  $('#add').addEventListener('click', () => $('#file').click());
+  $('#import-more').addEventListener('click', () => $('#file').click());
+  $('#file').addEventListener('change', () => {
+    if ($('#file').files.length) uploadFiles([...$('#file').files]);
+    $('#file').value = '';
   });
-  const drop = $('#dropzone');
-  drop.addEventListener('click', () => fileInput.click());
-  ['dragenter', 'dragover'].forEach((name) => drop.addEventListener(name, (e) => {
-    e.preventDefault(); drop.classList.add('over');
-  }));
-  ['dragleave', 'drop'].forEach((name) => drop.addEventListener(name, (e) => {
-    e.preventDefault(); drop.classList.remove('over');
-  }));
-  drop.addEventListener('drop', (e) => {
+
+  // Drag & drop anywhere: an overlay appears only while a file is being dragged,
+  // so there is no leftover "drop images here" block at the bottom of the page.
+  const overlay = document.createElement('div');
+  overlay.id = 'drop-overlay';
+  overlay.textContent = '松开即可导入图片';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:80;display:none;align-items:center;' +
+    'justify-content:center;background:rgba(0,0,0,.78);color:#d9a441;font-size:18px;' +
+    'border:4px dashed #d9a441';
+  document.body.appendChild(overlay);
+  document.addEventListener('dragover', (e) => { e.preventDefault(); overlay.style.display = 'flex'; });
+  document.addEventListener('dragleave', (e) => {
+    if (!e.relatedTarget) overlay.style.display = 'none';
+  });
+  document.addEventListener('drop', (e) => {
+    e.preventDefault(); overlay.style.display = 'none';
     const files = [...e.dataTransfer.files];
     if (files.length) uploadFiles(files);
   });
@@ -647,6 +682,9 @@ function wire() {
     renderQueue();
   });
 
+  $('#queue-panel > summary').addEventListener('click', () => { state.queueUserToggled = true; });
+  $('#preset-open').addEventListener('click', () => $('#preset-panel').classList.add('open'));
+  $('#preset-close').addEventListener('click', () => $('#preset-panel').classList.remove('open'));
   $('#preset-select').addEventListener('change', renderPresets);
   $('#preset-apply').addEventListener('click', applyPreset);
   $('#preset-save').addEventListener('click', savePreset);
@@ -666,10 +704,8 @@ function wire() {
     event.preventDefault();
     setZoom(state.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12));
   }, { passive: false });
-
   $('#rot-left').addEventListener('click', () => setRotation((currentRotation() + 3) % 4));
   $('#rot-right').addEventListener('click', () => setRotation((currentRotation() + 1) % 4));
-
   $('#compare-toggle').addEventListener('click', () => {
     state.compareOn = !state.compareOn;
     $('#compare-toggle').classList.toggle('active', state.compareOn);
@@ -680,10 +716,7 @@ function wire() {
     applyCompare();
   });
   wirePan();
-  const setHeaderVar = () => document.documentElement.style.setProperty(
-    '--header-h', `${Math.round($('header').getBoundingClientRect().height)}px`);
-  setHeaderVar();
-  window.addEventListener('resize', () => { setHeaderVar(); layoutCanvas(); });
+  window.addEventListener('resize', syncLayout);
 }
 
 function wirePan() {
@@ -712,7 +745,7 @@ function wirePan() {
 function status(message, isError = false) {
   const node = $('#render-status');
   node.textContent = message;
-  node.className = isError ? 'err' : 'dim';
+  node.className = isError ? 'err status-bar' : 'dim status-bar';
 }
 
-boot().catch((err) => status(`初始化失败: ${err.message}`, true));
+boot().catch((err) => status(`界面初始化异常：${err.message}`, true));

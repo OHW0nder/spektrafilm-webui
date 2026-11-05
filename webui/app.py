@@ -40,6 +40,9 @@ for directory in (UPLOAD_DIR, OUTPUT_DIR, TMP_DIR, JOB_DIR, PRESET_DIR):
 MAX_UPLOAD_BYTES = int(os.environ.get("SPEKTRAFILM_MAX_UPLOAD_MB", "256")) * 1024 * 1024
 _UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
+# Bump on every front-end change: browsers were serving a cached app.js against
+# a new index.html, which made boot() throw and left every tab click dead.
+ASSET_VERSION = "20261105a"
 # Preset names are display strings, not file names: keep CJK, strip only
 # path separators / control characters.
 _UNSAFE_PRESET_NAME = re.compile(r"[/\\\x00-\x1f<>:\"|?*]+")
@@ -95,7 +98,11 @@ class PresetRequest(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
-    return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(
+        html.replace("__ASSET_VERSION__", ASSET_VERSION),
+        headers={"Cache-Control": "no-store, must-revalidate"},
+    )
 
 
 @app.get("/api/health")
