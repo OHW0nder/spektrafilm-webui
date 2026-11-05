@@ -30,6 +30,8 @@ class JobStore:
             "error": None,
             "output": None,
             "engine": "python-f64",
+            "stage": "排队中",
+            "progress": 0,
             **meta,
         }
         self._write(job)

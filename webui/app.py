@@ -31,14 +31,39 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 OUTPUT_DIR = DATA_DIR / "outputs"
 TMP_DIR = DATA_DIR / "tmp"
 JOB_DIR = DATA_DIR / "jobs"
+PRESET_DIR = DATA_DIR / "presets"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-for directory in (UPLOAD_DIR, OUTPUT_DIR, TMP_DIR, JOB_DIR):
+for directory in (UPLOAD_DIR, OUTPUT_DIR, TMP_DIR, JOB_DIR, PRESET_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 MAX_UPLOAD_BYTES = int(os.environ.get("SPEKTRAFILM_MAX_UPLOAD_MB", "256")) * 1024 * 1024
 _UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
+# Preset names are display strings, not file names: keep CJK, strip only
+# path separators / control characters.
+_UNSAFE_PRESET_NAME = re.compile(r"[/\\\x00-\x1f<>:\"|?*]+")
+
+# Curated starting points; user presets live in /data/presets/*.json.
+BUILTIN_PRESETS = [
+    {"id": "builtin-portra", "name": "Portra 400 · 标准",
+     "payload": {"film": "kodak_portra_400", "print": "kodak_portra_endura",
+                 "values": {}, "extra": {}}, "builtin": True},
+    {"id": "builtin-gold", "name": "Gold 200 · 暖调高饱和",
+     "payload": {"film": "kodak_gold_200", "print": "fujifilm_crystal_archive_typeii",
+                 "values": {"camera.exposure_compensation_ev": 0.5,
+                            "film_render.grain.particle_area_um2": 0.5},
+                 "extra": {}}, "builtin": True},
+    {"id": "builtin-slide", "name": "Velvia 100 · 反转片",
+     "payload": {"film": "fujifilm_velvia_100", "print": "kodak_portra_endura",
+                 "values": {"io.scan_film": True}, "extra": {}}, "builtin": True},
+    {"id": "builtin-soft", "name": "柔光 · 扩散滤镜",
+     "payload": {"film": "kodak_portra_400", "print": "kodak_portra_endura",
+                 "values": {"camera.diffusion_filter.active": True,
+                            "camera.diffusion_filter.filter_family": "black_pro_mist",
+                            "camera.diffusion_filter.strength": 0.5},
+                 "extra": {}}, "builtin": True},
+]
 
 app = FastAPI(title="spektrafilm", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -57,9 +82,15 @@ class PreviewRequest(BaseModel):
 class RenderRequest(BaseModel):
     upload_ids: list[str]
     rotation: int = 0
+    rotations: dict[str, int] = {}   # per-image override (rotation follows the image)
     payload: dict[str, Any]
     mode: str = "gpu"          # gpu (fast) | cpu (f64 reference)
     max_edge: int = 2400
+
+
+class PresetRequest(BaseModel):
+    name: str
+    payload: dict[str, Any]
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -76,6 +107,7 @@ def health() -> dict[str, Any]:
         "gpu_backend": engine_rs.RS_BACKEND if engine_rs.available() else None,
         "max_pixels": engine_py.MAX_PIXELS,
         "preview_edge": engine_py.PREVIEW_EDGE,
+        "preview_size": param_mod.PREVIEW_QUALITY_SIZE,
         "interrupted_jobs": INTERRUPTED,
     }
 
@@ -83,6 +115,52 @@ def health() -> dict[str, Any]:
 @app.get("/api/manifest")
 def manifest() -> dict[str, Any]:
     return param_mod.manifest()
+
+
+@app.get("/api/presets")
+def presets() -> list[dict[str, Any]]:
+    out = list(BUILTIN_PRESETS)
+    for path in PRESET_DIR.glob("*.json"):
+        try:
+            out.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    out.sort(key=lambda item: (not item.get("builtin"), item.get("name", "")))
+    return out
+
+
+@app.post("/api/presets")
+def save_preset(body: PresetRequest) -> dict[str, Any]:
+    name = _UNSAFE_PRESET_NAME.sub("_", body.name.strip())[:60]
+    if not name:
+        raise HTTPException(status_code=400, detail="preset name required")
+    entry = {
+        "id": uuid.uuid4().hex[:12], "name": name,
+        "payload": body.payload, "created": time.time(), "builtin": False,
+    }
+    (PRESET_DIR / f"{entry['id']}.json").write_text(
+        json.dumps(entry), encoding="utf-8")
+    return entry
+
+
+@app.delete("/api/presets/{preset_id}")
+def delete_preset(preset_id: str) -> dict[str, Any]:
+    safe = "".join(ch for ch in preset_id if ch.isalnum() or ch in "-_")
+    path = PRESET_DIR / f"{safe}.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="preset not found")
+    path.unlink()
+    return {"deleted": safe}
+
+
+@app.post("/api/rotation/{upload_id}")
+def set_upload_rotation(upload_id: str, rotation: int = 0) -> dict[str, Any]:
+    """Rotation belongs to the image, not to the viewer's global state."""
+    meta = _meta(upload_id)
+    meta["rotation"] = int(rotation) % 4
+    (UPLOAD_DIR / f"{_check_id(upload_id)}.meta.json").write_text(
+        json.dumps(meta), encoding="utf-8")
+    return meta
 
 
 @app.get("/api/uploads")
@@ -166,6 +244,7 @@ async def upload(
             "raw": ext in engine_py.RAW_EXTENSIONS,
             "input_encoding": input_encoding,
             "source_space": source_space,
+            "rotation": 0,
             "created": time.time(),
             **engine_py.describe(image),
         }
@@ -205,10 +284,12 @@ def render(request: RenderRequest) -> dict[str, Any]:
     jobs = []
     for upload_id in request.upload_ids:
         meta = _meta(upload_id)
+        image_rotation = int(request.rotations.get(upload_id, rotation)) % 4
         job = _jobs.create(upload_id=upload_id, source=meta["name"],
-                           mode=mode, engine=("wgpu-f32" if mode == "gpu" else "python-f64"))
+                           rotation=image_rotation, mode=mode,
+                           engine=("wgpu-f32" if mode == "gpu" else "python-f64"))
         jobs.append(job)
-        _pool.submit(_run_render, job["id"], upload_id, rotation,
+        _pool.submit(_run_render, job["id"], upload_id, image_rotation,
                      request.payload, mode, max_edge)
     return {"jobs": jobs, "mode": mode}
 
@@ -220,6 +301,15 @@ def job_status(job_id: str) -> dict[str, Any]:
     job = _jobs.get(job_id)
     if job.get("status") in {"queued", "running"}:
         job["elapsed"] = round(time.time() - job["created"], 1)
+        active = sorted(
+            (entry for entry in _jobs.list_recent(limit=1000)
+             if entry.get("status") in {"queued", "running"}),
+            key=lambda entry: entry.get("created", 0))
+        for index, entry in enumerate(active, start=1):
+            if entry["id"] == job_id:
+                job["queue_position"] = index
+                job["queue_total"] = len(active)
+                break
     return job
 
 
@@ -287,7 +377,7 @@ def _run_render(job_id: str, upload_id: str, rotation: int,
     started = time.time()
     stem = ""
     try:
-        _jobs.update(job_id, status="running", stage="解码")
+        _jobs.update(job_id, status="running", stage="解码", progress=10)
         meta = _meta(upload_id)
         image = engine_py.decode_source(
             str(_original_path(upload_id)),
@@ -297,13 +387,14 @@ def _run_render(job_id: str, upload_id: str, rotation: int,
         )
         image = engine_py.rotate(image, rotation)
         params = _params(payload)
+        _jobs.update(job_id, stage="准备渲染", progress=35)
 
         safe_source = _SAFE_NAME.sub("_", Path(meta["name"]).stem)[:60]
         stem = f"spektrafilm-{safe_source}-{job_id}"
         tmp_in = TMP_DIR / f"{uuid.uuid4().hex}.tif"
 
         if mode == "gpu":
-            _jobs.update(job_id, stage="GPU 渲染")
+            _jobs.update(job_id, stage="GPU 渲染", progress=55)
             engine_py.write_linear_tiff(str(tmp_in), image)
             engine_rs.render(
                 str(tmp_in), str(OUTPUT_DIR / f"{stem}.png"),
@@ -313,12 +404,13 @@ def _run_render(job_id: str, upload_id: str, rotation: int,
             )
             name = f"{stem}.png"
         else:
-            _jobs.update(job_id, stage="f64 计算（CPU 满核，可能较慢）")
+            _jobs.update(job_id, stage="f64 计算（CPU 满核，可能较慢）", progress=45)
             result = engine_py.render_full(image.astype("float64"), params)
-            _jobs.update(job_id, stage="保存")
+            _jobs.update(job_id, stage="保存", progress=90)
             name = f"{stem}.tif"
             engine_py.write_tiff(str(OUTPUT_DIR / name), result, params)
         tmp_in.unlink(missing_ok=True)
+        _jobs.update(job_id, stage="写入结果", progress=95)
 
         (OUTPUT_DIR / f"{stem}.json").write_text(json.dumps({
             "name": name,
@@ -332,13 +424,14 @@ def _run_render(job_id: str, upload_id: str, rotation: int,
             "upload_id": upload_id,
         }), encoding="utf-8")
         _jobs.update(job_id, status="done", output=name, stage="完成",
-                     finished=time.time(), duration=round(time.time() - started, 1))
+                     progress=100, finished=time.time(),
+                     duration=round(time.time() - started, 1))
     except Exception as exc:
         if stem:
             (OUTPUT_DIR / f"{stem}.png").unlink(missing_ok=True)
             (OUTPUT_DIR / f"{stem}.tif").unlink(missing_ok=True)
-        _jobs.update(job_id, status="failed", stage="失败", error=str(exc),
-                     finished=time.time())
+        _jobs.update(job_id, status="failed", stage="失败", progress=0,
+                     error=str(exc), finished=time.time())
 
 
 def _gpu_preview(image, params, payload: dict[str, Any]) -> bytes | None:

@@ -9,6 +9,7 @@ manifest (the knobs that actually change the look) and accepts an optional
 
 from __future__ import annotations
 
+import os
 from dataclasses import fields, is_dataclass
 from typing import Any
 
@@ -19,6 +20,9 @@ from spektrafilm.runtime.params_schema import RuntimePhotoParams
 
 DEFAULT_FILM = "kodak_portra_400"
 DEFAULT_PRINT = "kodak_portra_endura"
+# GPU previews stay under ~1 s even at 1280 px, which is noticeably sharper
+# than the upstream 640 px default on high-DPI screens.
+PREVIEW_QUALITY_SIZE = int(os.environ.get("SPEKTRAFILM_PREVIEW_SIZE", "1280"))
 
 # Groups are rendered in this order.
 GROUPS: list[tuple[str, str]] = [
@@ -161,6 +165,7 @@ def default_payload() -> dict[str, Any]:
     for item in MANIFEST:
         value = _get_path(params, item["path"])
         values[item["path"]] = list(value) if isinstance(value, tuple) else value
+    values["settings.preview_max_size"] = PREVIEW_QUALITY_SIZE
     return {
         "film": DEFAULT_FILM,
         "print": DEFAULT_PRINT,
